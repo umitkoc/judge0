@@ -1,4 +1,4 @@
-var defaultUrl = localStorageGetItem("api-url") || "https://ce.judge0.com";
+var defaultUrl = localStorageGetItem("api-url") || "http://localhost:2358";
 var apiUrl = defaultUrl;
 var wait = localStorageGetItem("wait") || false;
 var check_timeout = 300;
@@ -16,8 +16,11 @@ var MonacoEmacs;
 var layout;
 
 var sourceEditor;
-var dataEditor;
+var stdinEditor;
 var stdoutEditor;
+var stderrEditor;
+var compileOutputEditor;
+var sandboxMessageEditor;
 
 var isEditorDirty = false;
 var currentLanguageId;
@@ -34,57 +37,7 @@ var $statusLine;
 var timeStart;
 var timeEnd;
 
-
-var layoutConfig = {
-    settings: {
-        showPopoutIcon: false,
-        reorderEnabled: true
-    },
-    dimensions: {
-        borderWidth: 3,
-        headerHeight: 22
-    },
-    content: [{
-        type: "column",
-        content: [{
-            type: "component",
-            componentName: "source",
-            title: "CODE",
-            isClosable: false,
-            componentState: {
-                readOnly: false
-            },
-        }, {
-            type: "row",
-            content: [
-                {
-                type: "column",
-                content: [{
-                        type: "component",
-                        componentName: "stdout",
-                        title: "STDOUT",
-                        isClosable: false,
-                        componentState: {
-                            readOnly: true
-                        }
-                    }]
-            },
-            {
-                type: "column",
-                content: [{
-                        type: "component",
-                        componentName: "stderr",
-                        title: "Question",
-                        isClosable: false,
-                        componentState: {
-                            readOnly: true
-                        },
-                        
-                    }]
-            }]
-        }]
-    }]
-};
+var messagesData;
 
 function encode(str) {
     return btoa(unescape(encodeURIComponent(str || "")));
@@ -101,7 +54,7 @@ function decode(bytes) {
 
 function localStorageSetItem(key, value) {
   try {
-    localStorage.setItem(key, "false");
+    localStorage.setItem(key, value);
   } catch (ignorable) {
   }
 }
@@ -114,26 +67,44 @@ function localStorageGetItem(key) {
   }
 }
 
+function showMessages() {
+    var width = $updates.offset().left - parseFloat($updates.css("padding-left")) -
+                $navigationMessage.parent().offset().left - parseFloat($navigationMessage.parent().css("padding-left")) - 5;
 
+    if (width < 200 || messagesData === undefined) {
+        return;
+    }
 
+    var messages = messagesData["messages"];
 
-function showError(title, content) {
-    $("#site-modal #title").html(title);
-    $("#site-modal .content").html(content);
-    $("#site-modal").modal("show");
+    $navigationMessage.css("animation-duration", messagesData["duration"]);
+    $navigationMessage.parent().width(width - 5);
+
+    var combinedMessage = "";
+    for (var i = 0; i < messages.length; ++i) {
+        combinedMessage += `${messages[i]}`;
+        if (i != messages.length - 1) {
+            combinedMessage += "&nbsp".repeat(Math.min(200, messages[i].length));
+        }
+    }
+
+    $navigationMessage.html(combinedMessage);
 }
 
-function handleError(jqXHR, textStatus, errorThrown) {
-    showError(`${jqXHR.statusText} (${jqXHR.status})`, `<pre>${JSON.stringify(jqXHR, null, 4)}</pre>`);
-}
 
-function handleRunError(jqXHR, textStatus, errorThrown) {
-    handleError(jqXHR, textStatus, errorThrown);
-    $runBtn.removeClass("loading");
-}
+
+
 
 function handleResult(data) {
+    timeEnd = performance.now();
+
+    var status = data.status;
     var stdout = decode(data.stdout);
+    var time = (data.time === null ? "-" : data.time + "s");
+    var memory = (data.memory === null ? "-" : data.memory + "KB");
+
+    $statusLine.html(`${status.description}, ${time}, ${memory}`);
+
     if (blinkStatusLine) {
         $statusLine.addClass("blink");
         setTimeout(function() {
@@ -142,17 +113,7 @@ function handleResult(data) {
             $statusLine.removeClass("blink");
         }, 3000);
     }
-
-    stdoutEditor.setValue(stdout);
-    console.log(stdout);                  // ----> here console stdout catching value :)
-
-    if (stdout !== "") {
-        var dot = document.getElementById("stdout-dot");
-        if (!dot.parentElement.classList.contains("lm_active")) {
-            dot.hidden = false;
-        }
-    }
-    $runBtn.removeClass("loading");
+    document.getElementById("output").innerHTML=stdout;
 }
 
 function getIdFromURI() {
@@ -167,10 +128,10 @@ function loadSavedSource() {
 
     if (snippet_id.length == 36) {
         $.ajax({
-            url: apiUrl + "/submissions/" + snippet_id + "?fields=source_code,language_id,stdin,stdout,time,memory,status,compiler_options,command_line_arguments&base64_encoded=true",
+            url: apiUrl + "/submissions/" + snippet_id + "?fields=source_code,language_id,stdin,stdout,stderr,compile_output,message,time,memory,status,compiler_options,command_line_arguments&base64_encoded=true",
             type: "GET",
             success: function(data, textStatus, jqXHR) {
-                sourceEditor.setValue(decode(data["source_code"]));
+                document.getElementById("source").innerHTML=data["source_code"]
                 $selectLanguage.dropdown("set selected", data["language_id"]);
                 $compilerOptions.val(data["compiler_options"]);
                 $commandLineArguments.val(data["command_line_arguments"]);
@@ -188,22 +149,14 @@ function loadSavedSource() {
 }
 
 function run() {
-    if (sourceEditor.getValue().trim() === "") {
-        alert("lütfen boş bırakmayınız !");
-        return;
-    } else {
-        $runBtn.addClass("loading");
-    }
+   
 
-    document.getElementById("stdout-dot").hidden = true;
 
-    stdoutEditor.setValue("");
-
-    var sourceValue = encode(sourceEditor.getValue());
+    var sourceValue = encode(document.getElementById("source").value);
     var languageId = resolveLanguageId($selectLanguage.val());
 
     if (parseInt(languageId) === 44) {
-        sourceValue = sourceEditor.getValue();
+        sourceValue = document.getElementById("source").value
     }
 
     var data = {
@@ -224,14 +177,12 @@ function run() {
                 withCredentials: apiUrl.indexOf("/secure") != -1 ? true : false
             },
             success: function (data, textStatus, jqXHR) {
-                // console.log(`Your submission token is: ${data.token}`);
                 if (wait == true) {
                     handleResult(data);
                 } else {
                     setTimeout(fetchSubmission.bind(null, data.token), check_timeout);
                 }
             },
-            error: handleRunError
         });
     }
 
@@ -274,20 +225,17 @@ function fetchSubmission(submission_token) {
             }
             handleResult(data);
         },
-        error: handleRunError
     });
 }
 
 function changeEditorLanguage() {
-    monaco.editor.setModelLanguage(sourceEditor.getModel(), $selectLanguage.find(":selected").attr("mode"));
     currentLanguageId = parseInt($selectLanguage.val());
-    $(".lm_title")[0].innerText = fileNames[currentLanguageId];
     apiUrl = resolveApiUrl($selectLanguage.val());
 }
 
 function insertTemplate() {
     currentLanguageId = parseInt($selectLanguage.val());
-    sourceEditor.setValue(sources[currentLanguageId]);
+    document.getElementById("source").innerHTML=sources[currentLanguageId]
     changeEditorLanguage();
 }
 
@@ -317,6 +265,23 @@ function disposeEditorModeObject() {
     }
 }
 
+function changeEditorMode() {
+    disposeEditorModeObject();
+
+    if (editorMode == "vim") {
+        editorModeObject = MonacoVim.initVimMode(sourceEditor, $("#editor-status-line")[0]);
+    } else if (editorMode == "emacs") {
+        var statusNode = $("#editor-status-line")[0];
+        editorModeObject = new MonacoEmacs.EmacsExtension(sourceEditor);
+        editorModeObject.onDidMarkChange(function(e) {
+          statusNode.textContent = e ? "Mark Set!" : "Mark Unset";
+        });
+        editorModeObject.onDidChangeKey(function(str) {
+          statusNode.textContent = str;
+        });
+        editorModeObject.start();
+    }
+}
 
 function resolveLanguageId(id) {
     id = parseInt(id);
@@ -330,13 +295,30 @@ function resolveApiUrl(id) {
 
 function editorsUpdateFontSize(fontSize) {
     sourceEditor.updateOptions({fontSize: fontSize});
+    stdinEditor.updateOptions({fontSize: fontSize});
     stdoutEditor.updateOptions({fontSize: fontSize});
+    stderrEditor.updateOptions({fontSize: fontSize});
+    compileOutputEditor.updateOptions({fontSize: fontSize});
+    sandboxMessageEditor.updateOptions({fontSize: fontSize});
 }
 
+function updateScreenElements() {
+    var display = window.innerWidth <= 1200 ? "none" : "";
+    $(".wide.screen.only").each(function(index) {
+        $(this).css("display", display);
+    });
+}
 
-
+$(window).resize(function() {
+    layout.updateSize();
+    updateScreenElements();
+    showMessages();
+});
 
 $(document).ready(function () {
+    updateScreenElements();
+
+
     $selectLanguage = $("#select-language");
     $selectLanguage.change(function (e) {
         if (!isEditorDirty) {
@@ -347,141 +329,99 @@ $(document).ready(function () {
     });
 
 
+    $insertTemplateBtn = $("#insert-template-btn");
+    $insertTemplateBtn.click(function (e) {
+        if (isEditorDirty && confirm("Are you sure? Your current changes will be lost.")) {
+            insertTemplate();
+        }
+    });
+
     $runBtn = $("#run-btn");
     $runBtn.click(function (e) {
         run();
     });
 
-  
+    $navigationMessage = $("#navigation-message span");
+    $updates = $("#judge0-more");
 
+    $(`input[name="editor-mode"][value="${editorMode}"]`).prop("checked", true);
+    $("input[name=\"editor-mode\"]").on("change", function(e) {
+        editorMode = e.target.value;
+        localStorageSetItem("editorMode", editorMode);
 
+        resizeEditor(sourceEditor.getLayoutInfo());
+        changeEditorMode();
 
+        sourceEditor.focus();
+    });
 
+    $("input[name=\"redirect-output\"]").prop("checked", redirectStderrToStdout)
+    $("input[name=\"redirect-output\"]").on("change", function(e) {
+        redirectStderrToStdout = e.target.checked;
+        localStorageSetItem("redirectStderrToStdout", redirectStderrToStdout);
+    });
 
-    require(["vs/editor/editor.main", "monaco-vim", "monaco-emacs"], function (ignorable, MVim, MEmacs) {
-        layout = new GoldenLayout(layoutConfig, $("#site-content"));
+    $statusLine = $("#status-line");
 
-        MonacoVim = MVim;
-        MonacoEmacs = MEmacs;
-
-        layout.registerComponent("source", function (container, state) {
-            sourceEditor = monaco.editor.create(container.getElement()[0], {
-                automaticLayout: true,
-                theme: "vs-dark",
-                scrollBeyondLastLine: true,
-                readOnly: state.readOnly,
-                language: "cpp",
-                minimap: {
-                    enabled: false
-                }
-            });
-
-
-            sourceEditor.getModel().onDidChangeContent(function (e) {
-                currentLanguageId = parseInt($selectLanguage.val());
-                isEditorDirty = sourceEditor.getValue() != sources[currentLanguageId];
-            });
-
-            sourceEditor.onDidLayoutChange(resizeEditor);
-        });
-
-        layout.registerComponent("stdin", function (container, state) {
-            stdinEditor = monaco.editor.create(container.getElement()[0], {
-                automaticLayout: true,
-                theme: "vs-dark",
-                scrollBeyondLastLine: false,
-                readOnly: state.readOnly,
-                language: "plaintext",
-                minimap: {
-                    enabled: false
-                }
-            });
-        });
-
-        layout.registerComponent("stdout", function (container, state) {
-            stdoutEditor = monaco.editor.create(container.getElement()[0], {
-                automaticLayout: true,
-                theme: "vs-dark",
-                scrollBeyondLastLine: false,
-                readOnly: state.readOnly,
-                language: "plaintext",
-                minimap: {
-                    enabled: false
-                }
-            });
-
-            container.on("tab", function(tab) {
-                tab.element.append("<span id=\"stdout-dot\" class=\"dot\" hidden></span>");
-                tab.element.on("mousedown", function(e) {
-                    e.target.closest(".lm_tab").children[3].hidden = true;
-                });
-            });
-        });
-
-        layout.registerComponent("stderr", function (container, state) {
-            stderrEditor = monaco.editor.create(container.getElement()[0], {
-                automaticLayout: true,
-                theme: "vs-dark",
-                scrollBeyondLastLine: false,
-                readOnly: state.readOnly,
-                language: "plaintext",
-                minimap: {
-                    enabled: false
-                }
-            });
-
-         
-        });
-
-        layout.registerComponent("compile output", function (container, state) {
-            compileOutputEditor = monaco.editor.create(container.getElement()[0], {
-                automaticLayout: true,
-                theme: "vs-dark",
-                scrollBeyondLastLine: false,
-                readOnly: state.readOnly,
-                language: "plaintext",
-                minimap: {
-                    enabled: false
-                }
-            });
-
-            container.on("tab", function(tab) {
-                tab.element.append("<span id=\"compile-output-dot\" class=\"dot\" hidden></span>");
-                tab.element.on("mousedown", function(e) {
-                    e.target.closest(".lm_tab").children[3].hidden = true;
-                });
-            });
-        });
-
-        layout.registerComponent("sandbox message", function (container, state) {
-            sandboxMessageEditor = monaco.editor.create(container.getElement()[0], {
-                automaticLayout: true,
-                theme: "vs-dark",
-                scrollBeyondLastLine: false,
-                readOnly: state.readOnly,
-                language: "plaintext",
-                minimap: {
-                    enabled: false
-                }
-            });
-
-            container.on("tab", function(tab) {
-                tab.element.append("<span id=\"sandbox-message-dot\" class=\"dot\" hidden></span>");
-                tab.element.on("mousedown", function(e) {
-                    e.target.closest(".lm_tab").children[3].hidden = true;
-                });
-            });
-        });
-
-        
-
-        layout.init();
+    $("body").keydown(function (e) {
+        var keyCode = e.keyCode || e.which;
+        if (keyCode == 120) { // F9
+            e.preventDefault();
+            run();
+        } else if (keyCode == 119) { // F8
+            e.preventDefault();
+            var url = prompt("Enter URL of Judge0 API:", apiUrl);
+            if (url != null) {
+                url = url.trim();
+            }
+            if (url != null && url != "") {
+                apiUrl = url;
+                localStorageSetItem("api-url", apiUrl);
+            }
+        } else if (keyCode == 118) { // F7
+            e.preventDefault();
+            wait = !wait;
+            localStorageSetItem("wait", wait);
+            alert(`Submission wait is ${wait ? "ON. Enjoy" : "OFF"}.`);
+        } else if (event.ctrlKey && keyCode == 107) { // Ctrl++
+            e.preventDefault();
+            fontSize += 1;
+            editorsUpdateFontSize(fontSize);
+        } else if (event.ctrlKey && keyCode == 109) { // Ctrl+-
+            e.preventDefault();
+            fontSize -= 1;
+            editorsUpdateFontSize(fontSize);
+        }
     });
 });
 
+// Template Sources
+var assemblySource = "\
+section	.text\n\
+    global _start\n\
+\n\
+_start:\n\
+\n\
+    xor	eax, eax\n\
+    lea	edx, [rax+len]\n\
+    mov	al, 1\n\
+    mov	esi, msg\n\
+    mov	edi, eax\n\
+    syscall\n\
+\n\
+    xor	edi, edi\n\
+    lea	eax, [rdi+60]\n\
+    syscall\n\
+\n\
+section	.rodata\n\
+\n\
+msg	db 'hello, world', 0xa\n\
+len	equ	$ - msg\n\
+";
 
+var bashSource = "echo \"hello, world\"";
 
-
+var basicSource = "PRINT \"hello, world\"";
 
 var cSource = "\
 // Powered by Judge0\n\
@@ -509,6 +449,69 @@ int main() {\n\
     return 0;\n\
 }\n\
 ";
+
+var clojureSource = "(println \"hello, world\")\n";
+
+var cobolSource = "\
+IDENTIFICATION DIVISION.\n\
+PROGRAM-ID. MAIN.\n\
+PROCEDURE DIVISION.\n\
+DISPLAY \"hello, world\".\n\
+STOP RUN.\n\
+";
+
+var lispSource = "(write-line \"hello, world\")";
+
+var dSource = "\
+import std.stdio;\n\
+\n\
+void main()\n\
+{\n\
+    writeln(\"hello, world\");\n\
+}\n\
+";
+
+var elixirSource = "IO.puts \"hello, world\"";
+
+var erlangSource = "\
+main(_) ->\n\
+    io:fwrite(\"hello, world\\n\").\n\
+";
+
+var executableSource = "\
+Judge0 IDE assumes that content of executable is Base64 encoded.\n\
+\n\
+This means that you should Base64 encode content of your binary,\n\
+paste it here and click \"Run\".\n\
+\n\
+Here is an example of compiled \"hello, world\" NASM program.\n\
+Content of compiled binary is Base64 encoded and used as source code.\n\
+\n\
+https://ide.judge0.com/?kS_f\n\
+";
+
+var fsharpSource = "printfn \"hello, world\"\n";
+
+var fortranSource = "\
+program main\n\
+    print *, \"hello, world\"\n\
+end\n\
+";
+
+var goSource = "\
+package main\n\
+\n\
+import \"fmt\"\n\
+\n\
+func main() {\n\
+    fmt.Println(\"hello, world\")\n\
+}\n\
+";
+
+var groovySource = "println \"hello, world\"\n";
+
+var haskellSource = "main = putStrLn \"hello, world\"";
+
 var javaSource = "\
 public class Main {\n\
     public static void main(String[] args) {\n\
@@ -516,6 +519,17 @@ public class Main {\n\
     }\n\
 }\n\
 ";
+
+var javaScriptSource = "console.log(\"hello, world\");";
+
+var kotlinSource = "\
+fun main() {\n\
+    println(\"hello, world\")\n\
+}\n\
+";
+
+var luaSource = "print(\"hello, world\")";
+
 var objectiveCSource = "\
 #import <Foundation/Foundation.h>\n\
 \n\
@@ -530,9 +544,85 @@ int main() {\n\
 }\n\
 ";
 
+var ocamlSource = "print_endline \"hello, world\"";
+
+var octaveSource = "printf(\"hello, world\\n\");";
+
+var pascalSource = "\
+program Hello;\n\
+begin\n\
+    writeln ('hello, world')\n\
+end.\n\
+";
+
+var perlSource = "\
+my $name = <STDIN>;\n\
+print \"hello, $name\";\n\
+";
+
+var phpSource = "\
+<?php\n\
+print(\"hello, world\\n\");\n\
+?>\n\
+";
+
+var plainTextSource = "hello, world\n";
+
+var prologSource = "\
+:- initialization(main).\n\
+main :- write('hello, world\\n').\n\
+";
 
 var pythonSource = "print(\"hello, world\")";
 
+var rSource = "cat(\"hello, world\\n\")";
+
+var rubySource = "puts \"hello, world\"";
+
+var rustSource = "\
+fn main() {\n\
+    println!(\"hello, world\");\n\
+}\n\
+";
+
+var scalaSource = "\
+object Main {\n\
+    def main(args: Array[String]) = {\n\
+        val name = scala.io.StdIn.readLine()\n\
+        println(\"hello, \"+ name)\n\
+    }\n\
+}\n\
+";
+
+var sqliteSource = "\
+-- On Judge0 IDE your SQL script is run on chinook database (https://www.sqlitetutorial.net/sqlite-sample-database).\n\
+-- For more information about how to use SQL with Judge0 API please\n\
+-- watch this asciicast: https://asciinema.org/a/326975.\n\
+SELECT\n\
+    Name, COUNT(*) AS num_albums\n\
+FROM artists JOIN albums\n\
+ON albums.ArtistID = artists.ArtistID\n\
+GROUP BY Name\n\
+ORDER BY num_albums DESC\n\
+LIMIT 4;\n\
+";
+var sqliteAdditionalFiles = "";
+
+var swiftSource = "\
+import Foundation\n\
+let name = readLine()\n\
+print(\"hello, \\(name!)\")\n\
+";
+
+var typescriptSource = "console.log(\"hello, world\");";
+
+var vbSource = "\
+Public Module Program\n\
+   Public Sub Main()\n\
+      Console.WriteLine(\"hello, world\")\n\
+   End Sub\n\
+End Module\n\
+";
 
 var c3Source = "\
 // On the Judge0 IDE, C3 is automatically\n\
@@ -545,6 +635,27 @@ func int main()\n\
 {\n\
     printf(\"hello, world\\n\");\n\
     return 0;\n\
+}\n\
+";
+
+var javaTestSource = "\
+import static org.junit.jupiter.api.Assertions.assertEquals;\n\
+\n\
+import org.junit.jupiter.api.Test;\n\
+\n\
+class MainTest {\n\
+    static class Calculator {\n\
+        public int add(int x, int y) {\n\
+            return x + y;\n\
+        }\n\
+    }\n\
+\n\
+    private final Calculator calculator = new Calculator();\n\
+\n\
+    @Test\n\
+    void addition() {\n\
+        assertEquals(2, calculator.add(1, 1));\n\
+    }\n\
 }\n\
 ";
 
@@ -624,6 +735,53 @@ import sklearn\n\
 print(\"hello, world\")\n\
 ";
 
+var bosqueSource = "\
+// On the Judge0 IDE, Bosque (https://github.com/microsoft/BosqueLanguage)\n\
+// is automatically updated every hour to the latest commit on master branch.\n\
+\n\
+namespace NSMain;\n\
+\n\
+concept WithName {\n\
+    invariant $name != \"\";\n\
+\n\
+    field name: String;\n\
+}\n\
+\n\
+concept Greeting {\n\
+    abstract method sayHello(): String;\n\
+    \n\
+    virtual method sayGoodbye(): String {\n\
+        return \"goodbye\";\n\
+    }\n\
+}\n\
+\n\
+entity GenericGreeting provides Greeting {\n\
+    const instance: GenericGreeting = GenericGreeting@{};\n\
+\n\
+    override method sayHello(): String {\n\
+        return \"hello world\";\n\
+    }\n\
+}\n\
+\n\
+entity NamedGreeting provides WithName, Greeting {\n\
+    override method sayHello(): String {\n\
+        return String::concat(\"hello\", \" \", this.name);\n\
+    }\n\
+}\n\
+\n\
+entrypoint function main(arg?: String): String {\n\
+    var val = arg ?| \"\";\n\
+    if (val == \"1\") {\n\
+        return GenericGreeting@{}.sayHello();\n\
+    }\n\
+    elif (val == \"2\") {\n\
+        return GenericGreeting::instance.sayHello();\n\
+    }\n\
+    else {\n\
+        return NamedGreeting@{name=\"bob\"}.sayHello();\n\
+    }\n\
+}\n\
+";
 
 var cppTestSource = "\
 #include <gtest/gtest.h>\n\
@@ -687,6 +845,9 @@ public class Tests\n\
 ";
 
 var sources = {
+    45: assemblySource,
+    46: bashSource,
+    47: basicSource,
     48: cSource,
     49: cSource,
     50: cSource,
@@ -694,20 +855,53 @@ var sources = {
     52: cppSource,
     53: cppSource,
     54: cppSource,
+    55: lispSource,
+    56: dSource,
+    57: elixirSource,
+    58: erlangSource,
+    44: executableSource,
+    59: fortranSource,
+    60: goSource,
+    61: haskellSource,
+    62: javaSource,
+    63: javaScriptSource,
+    64: luaSource,
+    65: ocamlSource,
+    66: octaveSource,
+    67: pascalSource,
+    68: phpSource,
+    43: plainTextSource,
+    69: prologSource,
     70: pythonSource,
     71: pythonSource,
+    72: rubySource,
+    73: rustSource,
+    74: typescriptSource,
     75: cSource,
     76: cppSource,
+    77: cobolSource,
+    78: kotlinSource,
     79: objectiveCSource,
+    80: rSource,
+    81: scalaSource,
+    82: sqliteSource,
+    83: swiftSource,
+    84: vbSource,
+    85: perlSource,
+    86: clojureSource,
+    87: fsharpSource,
+    88: groovySource,
     1001: cSource,
     1002: cppSource,
     1003: c3Source,
     1004: javaSource,
+    1005: javaTestSource,
     1006: mpiccSource,
     1007: mpicxxSource,
     1008: mpipySource,
     1009: nimSource,
     1010: pythonForMlSource,
+    1011: bosqueSource,
     1012: cppTestSource,
     1013: cSource,
     1014: cppSource,
@@ -715,6 +909,7 @@ var sources = {
     1021: csharpSource,
     1022: csharpSource,
     1023: csharpTestSource,
+    1024: fsharpSource
 };
 
 var fileNames = {
@@ -807,7 +1002,7 @@ var languageIdTable = {
     1024: 24
 }
 
-var extraApiUrl = "https://extra-ce.judge0.com";
+var extraApiUrl = "http://localhost:2358";
 var languageApiUrlTable = {
     1001: extraApiUrl,
     1002: extraApiUrl,
